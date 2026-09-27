@@ -1,0 +1,21 @@
+# Secrets — real credentials live here, never commit
+config.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.env
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Bundled reference project (separate repo)
+UKMFolioPuller/

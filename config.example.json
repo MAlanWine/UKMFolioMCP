@@ -1,0 +1,9 @@
+{
+    "username": "your_matric_number",
+    "password": "your_password",
+    "base_url": "https://ukmfolio.ukm.my",
+    "sso_url": "https://sso.ukm.my",
+    "timezone": "Asia/Kuala_Lumpur",
+    "host": "127.0.0.1",
+    "port": 8000
+}

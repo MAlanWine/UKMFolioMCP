@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ukmfolio-mcp"
+version = "0.1.0"
+description = "MCP server exposing UKM Folio (Moodle LMS) content — courses, deadlines, announcements and documents — to AI agents."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "alanwine" }]
+dependencies = [
+    "mcp>=1.10",
+    "requests>=2.31",
+    "pypdf>=4.0",
+    "python-docx>=1.1",
+    "python-pptx>=0.6",
+    "openpyxl>=3.1",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.0",
+]
+
+[project.scripts]
+ukmfolio-mcp = "ukmfolio_mcp.server:main"
+
+[tool.setuptools.packages.find]
+include = ["ukmfolio_mcp*"]
