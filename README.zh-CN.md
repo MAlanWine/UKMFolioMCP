@@ -70,7 +70,7 @@
 依赖（已写入 `requirements.txt` / `pyproject.toml`）：
 
 ```
-mcp            # 官方 MCP Python SDK（FastMCP）
+mcp            # 官方 MCP Python SDK v2（MCPServer）
 requests       # HTTP / 会话
 pypdf          # 提取 PDF 文字
 python-docx    # 提取 .docx
@@ -81,7 +81,7 @@ lxml           # bs4 的解析后端
 pillow         # 为 view_image 解码 / 缩放 / 转换图片
 ```
 
-> `mcp` 限定为 `<2`：mcp 2.x 把本服务用到的 `FastMCP` 改名了。
+> 需要 `mcp` 2.x（`MCPServer`，即原来的 `FastMCP`）。工具都是普通同步函数，由 SDK 放到工作线程执行；任何失败都会以带原始信息的 `ToolError` 返回给 AI（否则 v2 会隐藏异常信息）。
 
 ---
 
@@ -626,7 +626,7 @@ UKMFolioMCP/
 │   ├── documents.py    cmid → 文件链接 → 下载 → 文本提取
 │   ├── images.py       从 HTML/文件列表中找出老师发的图片；为 view_image 下载 + 缩放
 │   ├── client.py       UKMFolioClient：会话缓存、自动重登、整理成 AI 友好结构
-│   └── server.py       FastMCP 工具定义 + 命令行（--stdio / --http-server）
+│   └── server.py       MCPServer 工具定义 + 命令行（--stdio / --http-server）
 ├── tests/              离线 pytest 测试（不联网）
 ├── config.example.json 配置模板
 ├── config.json         真实凭据（git 忽略）

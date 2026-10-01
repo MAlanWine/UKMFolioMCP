@@ -70,7 +70,7 @@ The server exposes 11 tools:
 Dependencies (declared in `requirements.txt` / `pyproject.toml`):
 
 ```
-mcp            # Official MCP Python SDK (FastMCP)
+mcp            # Official MCP Python SDK v2 (MCPServer)
 requests       # HTTP / session
 pypdf          # Extract PDF text
 python-docx    # Extract .docx
@@ -81,7 +81,7 @@ lxml           # bs4 parsing backend
 pillow         # Decode / downscale / convert images for view_image
 ```
 
-> `mcp` is pinned to `<2`: mcp 2.x renamed `FastMCP`, which this server uses.
+> Requires `mcp` 2.x (`MCPServer`, formerly `FastMCP`). Tools are plain sync functions — the SDK runs them on worker threads — and any failure is surfaced to the AI as a `ToolError` with its message (v2 otherwise hides unexpected exception text).
 
 ---
 
@@ -626,7 +626,7 @@ UKMFolioMCP/
 │   ├── documents.py    cmid → file links → download → text extraction
 │   ├── images.py       Find teacher-posted images in HTML/file lists; download + downscale for view_image
 │   ├── client.py       UKMFolioClient: session caching, auto-relogin, AI-friendly shaping
-│   └── server.py       FastMCP tool definitions + CLI (--stdio / --http-server)
+│   └── server.py       MCPServer tool definitions + CLI (--stdio / --http-server)
 ├── tests/              Offline pytest suite (no network)
 ├── config.example.json Config template
 ├── config.json         Real credentials (git-ignored)

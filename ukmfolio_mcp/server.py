@@ -1,8 +1,9 @@
 """UKMFolio MCP server — tool definitions and CLI entry point.
 
-Exposes UKM Folio content to AI agents over MCP. Tools are async and offload
-the blocking ``requests``-based client work to a worker thread so the event
-loop stays responsive (important for the HTTP transport).
+Exposes UKM Folio content to AI agents over MCP. Tools are plain functions:
+the MCP SDK (v2) runs sync handlers on a worker thread, so the blocking
+``requests``-based client work never stalls the event loop (important for the
+HTTP transport).
 
 Run:
     python -m ukmfolio_mcp --stdio                 # local (default)
@@ -17,9 +18,10 @@ import functools
 import json
 import sys
 
-import anyio
-from mcp.server.fastmcp import FastMCP, Image
+from mcp.server.mcpserver import Image, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
+from . import __version__
 from .client import UKMFolioClient
 from .config import Config, load_config
 
@@ -50,7 +52,9 @@ marker `[image: <alt> | <image_url>]`; files that are images carry
 course.\
 """
 
-mcp = FastMCP("ukmfolio", instructions=INSTRUCTIONS)
+mcp = MCPServer("ukmfolio", instructions=INSTRUCTIONS, version=__version__)
+
+STREAMABLE_HTTP_PATH = "/mcp"
 
 _config: Config | None = None
 _client: UKMFolioClient | None = None
@@ -69,32 +73,45 @@ def configure(config: Config) -> None:
     global _config, _client
     _config = config
     _client = None
-    mcp.settings.host = config.host
-    mcp.settings.port = config.port
 
 
-async def _run(fn, *args, **kwargs):
-    """Offload a blocking client call to a worker thread."""
-    return await anyio.to_thread.run_sync(
-        functools.partial(fn, *args, **kwargs))
+def tool(**kwargs):
+    """``@mcp.tool`` that reports failures to the model.
+
+    MCP SDK v2 hides the text of unexpected exceptions from the client (it
+    sends only "Error executing tool X"). Our failures — login rejected, an
+    HTTP 404, an undecodable image — are exactly what the AI needs to recover,
+    so surface them as ``ToolError``.
+    """
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kw):
+            try:
+                return fn(*args, **kw)
+            except ToolError:
+                raise
+            except Exception as e:
+                raise ToolError(f"{type(e).__name__}: {e}") from e
+        return mcp.tool(**kwargs)(wrapper)
+    return decorator
 
 
 # --- tools ------------------------------------------------------------------
 
-@mcp.tool()
-async def list_courses() -> list[dict]:
+@tool()
+def list_courses() -> list[dict]:
     """List the student's enrolled courses.
 
     Returns each course's id, full name, shortname (often the course code),
     category, progress percent, and a direct URL.
     """
-    return await _run(get_client().get_courses)
+    return get_client().get_courses()
 
 
-@mcp.tool()
-async def list_deadlines(course: str | None = None,
-                         days_ahead: int | None = None,
-                         include_past: bool = True) -> list[dict]:
+@tool()
+def list_deadlines(course: str | None = None,
+                   days_ahead: int | None = None,
+                   include_past: bool = True) -> list[dict]:
     """List assignment and quiz deadlines (Moodle calendar action events).
 
     Args:
@@ -107,14 +124,13 @@ async def list_deadlines(course: str | None = None,
     deadline_local (ISO), days_left, item_url, and course info. Sorted by
     deadline ascending.
     """
-    return await _run(get_client().get_deadlines,
-                      course=course, days_ahead=days_ahead,
-                      include_past=include_past)
+    return get_client().get_deadlines(course=course, days_ahead=days_ahead,
+                                      include_past=include_past)
 
 
-@mcp.tool()
-async def get_submission_status(course: str | None = None,
-                                cmid: int | None = None) -> list[dict]:
+@tool()
+def get_submission_status(course: str | None = None,
+                          cmid: int | None = None) -> list[dict]:
     """Check assignment submission status: submitted? graded? overdue?
 
     UKM Folio disables the assignment web-service APIs, so this scrapes each
@@ -132,14 +148,13 @@ async def get_submission_status(course: str | None = None,
     last_modified, item_url, and course info. submitted/graded/is_overdue are
     null when the page format is unrecognized (status_found=false).
     """
-    return await _run(get_client().get_submission_status,
-                      course=course, cmid=cmid)
+    return get_client().get_submission_status(course=course, cmid=cmid)
 
 
-@mcp.tool()
-async def list_announcements(course: str | None = None,
-                             limit: int = 20,
-                             with_body: bool = True) -> list[dict]:
+@tool()
+def list_announcements(course: str | None = None,
+                       limit: int = 20,
+                       with_body: bool = True) -> list[dict]:
     """List forum discussions / announcements (notifications) across courses.
 
     Args:
@@ -156,12 +171,12 @@ async def list_announcements(course: str | None = None,
     `[image: <alt> | <image_url>]`. Pass an image_url to view_image to see it —
     announcements are often just a poster with no text.
     """
-    return await _run(get_client().get_announcements,
-                      course=course, limit=limit, with_body=with_body)
+    return get_client().get_announcements(course=course, limit=limit,
+                                          with_body=with_body)
 
 
-@mcp.tool()
-async def get_discussion(discussion_id: int) -> dict:
+@tool()
+def get_discussion(discussion_id: int) -> dict:
     """Fetch the full thread of a forum discussion by its id.
 
     Returns the discussion title, url, post_count, and every post (oldest
@@ -170,11 +185,11 @@ async def get_discussion(discussion_id: int) -> dict:
     and attached images (pass image_url to view_image); message_text marks
     them inline as `[image: <alt> | <image_url>]`.
     """
-    return await _run(get_client().get_discussion, discussion_id)
+    return get_client().get_discussion(discussion_id)
 
 
-@mcp.tool()
-async def list_documents(course: str | None = None) -> list[dict]:
+@tool()
+def list_documents(course: str | None = None) -> list[dict]:
     """List downloadable documents / learning materials in a course.
 
     Covers Moodle resource (single file), folder (file bundle), url (external
@@ -186,13 +201,13 @@ async def list_documents(course: str | None = None) -> list[dict]:
         course: Optional course filter (id, shortname, or name substring).
             Omitting it scans every enrolled course (slower).
     """
-    return await _run(get_client().list_documents, course=course)
+    return get_client().list_documents(course=course)
 
 
-@mcp.tool()
-async def read_document(cmid: int, type: str = "resource",
-                        extract: bool = True,
-                        max_chars: int = 50000) -> dict:
+@tool()
+def read_document(cmid: int, type: str = "resource",
+                  extract: bool = True,
+                  max_chars: int = 50000) -> dict:
     """Download a document and extract its text content.
 
     Args:
@@ -209,13 +224,13 @@ async def read_document(cmid: int, type: str = "resource",
     Image files are not downloaded here: they carry is_image=true — pass their
     file_url to view_image. Page/book bodies list embedded images in `images`.
     """
-    return await _run(get_client().get_document_content,
-                      cmid=cmid, module_type=type,
-                      extract=extract, max_chars=max_chars)
+    return get_client().get_document_content(cmid=cmid, module_type=type,
+                                             extract=extract,
+                                             max_chars=max_chars)
 
 
-@mcp.tool()
-async def list_modules(course: str | None = None) -> list[dict]:
+@tool()
+def list_modules(course: str | None = None) -> list[dict]:
     """List ALL course modules of any kind (assignments, forums, resources,
     quizzes, labels, ...) with their detected type and cmid.
 
@@ -225,13 +240,13 @@ async def list_modules(course: str | None = None) -> list[dict]:
     Args:
         course: Optional course filter (id, shortname, or name substring).
     """
-    return await _run(get_client().list_modules, course=course)
+    return get_client().list_modules(course=course)
 
 
-@mcp.tool()
-async def list_images(course: str | None = None,
-                      include_forums: bool = True,
-                      include_course_content: bool = True) -> list[dict]:
+@tool()
+def list_images(course: str | None = None,
+                include_forums: bool = True,
+                include_course_content: bool = True) -> list[dict]:
     """List images teachers have posted, with an image_url for each.
 
     Scans forum discussions (images embedded in or attached to any post) and
@@ -250,13 +265,13 @@ async def list_images(course: str | None = None,
     source_title, source_url, cmid or discussion_id + post_id,
     posted_at_local for forum images, and course info.
     """
-    return await _run(get_client().list_images, course=course,
-                      include_forums=include_forums,
-                      include_course_content=include_course_content)
+    return get_client().list_images(course=course,
+                                    include_forums=include_forums,
+                                    include_course_content=include_course_content)
 
 
-@mcp.tool(structured_output=False)
-async def view_image(image_url: str, max_edge: int = 1568) -> list:
+@tool(structured_output=False)
+def view_image(image_url: str, max_edge: int = 1568) -> list:
     """Fetch an image and return it so you can see its content.
 
     Use this for any image_url from list_images / list_announcements /
@@ -271,16 +286,15 @@ async def view_image(image_url: str, max_edge: int = 1568) -> list:
     Returns a JSON text block (original/returned size and format) followed by
     the image itself.
     """
-    data, fmt, info = await _run(get_client().view_image, image_url,
-                                 max_edge=max_edge)
+    data, fmt, info = get_client().view_image(image_url, max_edge=max_edge)
     return [json.dumps(info, ensure_ascii=False), Image(data=data, format=fmt)]
 
 
-@mcp.tool()
-async def whoami() -> dict:
+@tool()
+def whoami() -> dict:
     """Diagnostic: confirm the session is authenticated and report base_url,
     timezone and the number of enrolled courses."""
-    return await _run(get_client().whoami)
+    return get_client().whoami()
 
 
 # --- CLI --------------------------------------------------------------------
@@ -340,8 +354,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.http_server:
         print(f"[*] UKMFolio MCP server on http://{config.host}:{config.port}"
-              f"{mcp.settings.streamable_http_path}", file=sys.stderr)
-        mcp.run(transport="streamable-http")
+              f"{STREAMABLE_HTTP_PATH}", file=sys.stderr)
+        mcp.run(transport="streamable-http", host=config.host,
+                port=config.port, streamable_http_path=STREAMABLE_HTTP_PATH)
     else:
         mcp.run(transport="stdio")
     return 0
