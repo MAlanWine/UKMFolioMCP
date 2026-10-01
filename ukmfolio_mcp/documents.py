@@ -23,6 +23,7 @@ from urllib.parse import unquote, urlparse
 
 import requests
 
+from . import images as images_mod
 from .moodle import SessionExpired
 
 _PLUGINFILE_RE = re.compile(r"https?://[^\s\"'<>\\]*?/pluginfile\.php/[^\s\"'<>\\]*")
@@ -56,11 +57,12 @@ def resolve_files(session, base_url, cmid: int, module_type: str) -> dict:
 
     Returns a dict:
       {"type": <module_type>, "files": [{"filename","file_url"}...],
-       "external_url": <str|None>, "page_text": <str|None>}
+       "external_url": <str|None>, "page_text": <str|None>,
+       "images": [...]}   # images embedded in page/book bodies
     """
     base_url = base_url.rstrip("/")
     result = {"type": module_type, "files": [], "external_url": None,
-              "page_text": None}
+              "page_text": None, "images": []}
 
     if module_type == "resource":
         r = session.get(f"{base_url}/mod/resource/view.php",
@@ -107,6 +109,8 @@ def resolve_files(session, base_url, cmid: int, module_type: str) -> dict:
         r.raise_for_status()
         _check_login_redirect(r)
         result["page_text"] = _extract_main_html_text(r.text)
+        result["images"] = images_mod.extract_images(
+            _main_html(r.text), base_url)
 
     return result
 
@@ -222,14 +226,21 @@ def _extract_xlsx(data: bytes) -> str:
     return "\n".join(parts).strip()
 
 
-def _extract_main_html_text(html: str) -> str:
+def _main_element(html: str):
     from bs4 import BeautifulSoup
 
     soup = BeautifulSoup(html, "lxml")
     for tag in soup(["script", "style", "nav", "header", "footer"]):
         tag.decompose()
-    main = (soup.find(attrs={"role": "main"})
+    return (soup.find(attrs={"role": "main"})
             or soup.find(id="region-main")
             or soup.body
             or soup)
-    return main.get_text("\n", strip=True)
+
+
+def _main_html(html: str) -> str:
+    return str(_main_element(html))
+
+
+def _extract_main_html_text(html: str) -> str:
+    return _main_element(html).get_text("\n", strip=True)

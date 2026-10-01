@@ -33,7 +33,7 @@ class Config:
 
     username: str
     password: str
-    base_url: str = "https://ukmfolio.ukm.my"
+    base_url: str = "https://ukmfoliov2.ukm.my"
     sso_url: str = "https://sso.ukm.my"
     timezone: str = DEFAULT_TIMEZONE
     # HTTP transport defaults (overridable via CLI)
@@ -105,7 +105,7 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
     return Config(
         username=username,
         password=password,
-        base_url=raw.get("base_url", "https://ukmfolio.ukm.my"),
+        base_url=raw.get("base_url", "https://ukmfoliov2.ukm.my"),
         sso_url=raw.get("sso_url", "https://sso.ukm.my"),
         timezone=raw.get("timezone", DEFAULT_TIMEZONE),
         host=raw.get("host", "127.0.0.1"),

@@ -8,6 +8,7 @@ An [MCP](https://modelcontextprotocol.io) (Model Context Protocol) server that l
 - 📝 Assignment / quiz deadlines
 - 📢 Forum announcements and discussions
 - 📄 Course documents (PDF / PPTX / DOCX / XLSX …, **auto-downloaded with body text extracted**)
+- 🖼️ Images teachers post (announcement posters, QR codes, schedules …) — **flagged in every result and returned as real images for the AI to read**
 
 The login and data-access logic is carried over from the battle-tested [`UKMFolioPuller`](./UKMFolioPuller): it first performs **SAML 2.0 single sign-on** through `sso.ukm.my`, then calls Moodle's AJAX endpoints plus targeted HTML scraping. (UKM Folio disables most list-level Web Service functions, so this hybrid approach is the one proven to actually work.)
 
@@ -35,7 +36,7 @@ The login and data-access logic is carried over from the battle-tested [`UKMFoli
 
 ## Features & Tools at a Glance
 
-The server exposes 9 tools:
+The server exposes 11 tools:
 
 | Tool | What it does |
 |------|------|
@@ -47,6 +48,8 @@ The server exposes 9 tools:
 | `list_documents` | List a course's documents (resource/folder/url/page/book), giving each `cmid` and `type` |
 | `read_document` | Download a document and **extract its body text** (PDF/DOCX/PPTX/XLSX/TXT/HTML) |
 | `list_modules` | List every kind of activity module in a course (to discover a cmid / inspect course structure) |
+| `list_images` | List every image teachers posted in a course (forum posts, labels, sections, pages, image files), each with an `image_url` |
+| `view_image` | Fetch one image by `image_url` and **return the image itself** so the AI can read it (auto-downscaled) |
 | `whoami` | Diagnostics: confirm login succeeded; returns site, timezone, course count |
 
 **Conventions shared across tools:**
@@ -54,13 +57,14 @@ The server exposes 9 tools:
 - Most tools take an optional `course` filter, which accepts a **course id**, a **course code** (e.g. `TTTN2423`), or **any substring of the course name**. If omitted, the tool covers all enrolled courses.
 - Time fields are returned in two forms: **unix seconds** (e.g. `deadline`) and an **ISO-8601 local-time string** (e.g. `deadline_local`, defaulting to Malaysia time `Asia/Kuala_Lumpur`).
 - The standard document-reading flow: call `list_documents` first to obtain `cmid` and `type`, then `read_document(cmid, type)`.
+- **Images are identified by their URL.** Wherever an image appears, results carry an `images` list (each entry has an `image_url`), post text marks its position inline as `[image: <alt> | <image_url>]`, and files that are images get `is_image: true`. Pass the URL to `view_image` to see it.
 
 ---
 
 ## Requirements
 
 - **Python ≥ 3.11** (this machine uses `/home/alanwine/PyVenv`, Python 3.14)
-- Network access to `ukmfolio.ukm.my` and `sso.ukm.my`
+- Network access to `ukmfoliov2.ukm.my` and `sso.ukm.my`
 - A valid UKM Folio account (matric number + password)
 
 Dependencies (declared in `requirements.txt` / `pyproject.toml`):
@@ -74,7 +78,10 @@ python-pptx    # Extract .pptx
 openpyxl       # Extract .xlsx
 beautifulsoup4 # Parse HTML pages
 lxml           # bs4 parsing backend
+pillow         # Decode / downscale / convert images for view_image
 ```
+
+> `mcp` is pinned to `<2`: mcp 2.x renamed `FastMCP`, which this server uses.
 
 ---
 
@@ -106,7 +113,7 @@ cp config.example.json config.json
 {
     "username": "a207421",
     "password": "your_password",
-    "base_url": "https://ukmfolio.ukm.my",
+    "base_url": "https://ukmfoliov2.ukm.my",
     "sso_url": "https://sso.ukm.my",
     "timezone": "Asia/Kuala_Lumpur",
     "host": "127.0.0.1",
@@ -118,7 +125,7 @@ cp config.example.json config.json
 |------|:---:|------|
 | `username` | ✅ | UKM matric number |
 | `password` | ✅ | Login password |
-| `base_url` | | UKM Folio site, defaults to `https://ukmfolio.ukm.my` |
+| `base_url` | | UKM Folio site, defaults to `https://ukmfoliov2.ukm.my` (the old `ukmfolio.ukm.my` now redirects there) |
 | `sso_url` | | SSO site, defaults to `https://sso.ukm.my` |
 | `timezone` | | Timezone used for time fields, defaults to `Asia/Kuala_Lumpur` |
 | `host` | | Default listen address in HTTP mode, defaults to `127.0.0.1` (overridable via `--host`) |
@@ -145,7 +152,7 @@ Normal output looks like:
 
 ```
 [*] Logging in to UKM Folio …
-[*] Authenticated. base_url=https://ukmfolio.ukm.my sesskey=LvH2dF34SK tz=Asia/Kuala_Lumpur
+[*] Authenticated. base_url=https://ukmfoliov2.ukm.my sesskey=LvH2dF34SK tz=Asia/Kuala_Lumpur
 [*] 6 enrolled courses:
         15292  TTTN2423   Keperluan Pensuisan, Penghalaan dan Tanpa Wayar
         23521  TTTM2213   PENGATURCARAAN APLIKASI MUDAH ALIH
@@ -328,6 +335,7 @@ List forum announcements/discussions (newest first).
     "reply_count": 0,
     "item_url": "https://ukmfolio.ukm.my/mod/forum/discuss.php?d=317111",
     "item_body": "Dear Students, Below is the link to today's lecture ...",
+    "images": [],
     "course_id": 15292,
     "course_shortname": "TTTN2423",
     "course_name": "Keperluan Pensuisan, ..."
@@ -336,6 +344,23 @@ List forum announcements/discussions (newest first).
 ```
 
 > `item_id` is the discussion id; pass it to `get_discussion` to see the full thread.
+
+`images` lists every image posted anywhere in the thread (embedded or attached), and `item_body` marks each one inline. Announcements are often *only* a poster, so the text alone can be empty or misleading:
+
+```jsonc
+{
+  "item_title": "Welcome & Important Notice: No Tutorial/Lab This Week",
+  "item_body": "[image: Announcement for no tutorial and lab for this week. | https://ukmfoliov2.ukm.my/pluginfile.php/14955/mod_forum/post/287/Gemini_Generated_Image_lfv2fwlfv2fwlfv2.jpg]",
+  "images": [
+    {
+      "image_url": "https://ukmfoliov2.ukm.my/pluginfile.php/14955/mod_forum/post/287/Gemini_Generated_Image_lfv2fwlfv2fwlfv2.jpg",
+      "filename": "Gemini_Generated_Image_lfv2fwlfv2fwlfv2.jpg",
+      "alt": "Announcement for no tutorial and lab for this week.",
+      "post_id": 287
+    }
+  ]
+}
+```
 
 ### 5. `get_discussion`
 
@@ -362,6 +387,7 @@ Fetch all posts of a single discussion.
       "modified_local": "2026-06-04T10:00:26+08:00",
       "message_text": "Dear Students, ...",
       "message_html": "<p>Dear Students, ...</p>",
+      "images": [],
       "parent_id": 0
     }
   ]
@@ -429,6 +455,8 @@ Return differences by `type`:
 - `url` module: returns `external_url` (the external link); nothing is downloaded.
 - `page` / `book` module: returns `page_text` (the in-site page body).
 - Unrecognized binary types: downloaded but `text` is `null`, with a `note` explaining there is no matching text extractor.
+- Image files (PNG/JPG/…) are **not** downloaded here: the entry gets `is_image: true` and a `note` — pass its `file_url` to `view_image`.
+- `page` / `book` bodies that embed images also return an `images` list.
 
 ### 8. `list_modules`
 
@@ -440,13 +468,66 @@ List **every kind** of module in a course (not just documents) — used to disco
 
 Returns each module's `cmid`, `name`, `type`, `url`, `section`, and `course_id`.
 
-### 9. `whoami`
+### 9. `list_images`
+
+List every image teachers have posted, each with an `image_url` to pass to `view_image`.
+
+| Parameter | Type | Default | Description |
+|------|------|------|------|
+| `course` | string? | all | Course filter (recommended — scanning is one request per discussion and per module) |
+| `include_forums` | bool | `true` | Scan forum posts (embedded images + attachments, every post in each thread) |
+| `include_course_content` | bool | `true` | Scan section summaries, labels / activity descriptions, page/book bodies, and image files in resource/folder modules |
+
+```jsonc
+[
+  {
+    "image_url": "https://ukmfoliov2.ukm.my/pluginfile.php/14980/mod_forum/post/118/WhatsApp%20Image%202026-09-25%20at%204.18.18%20PM.jpeg",
+    "filename": "WhatsApp Image 2026-09-25 at 4.18.18 PM.jpeg",
+    "alt": "TTTK2233",
+    "source": "forum_post",
+    "source_title": "2026/2027: Lecture whatsApp group",
+    "source_url": "https://ukmfoliov2.ukm.my/mod/forum/discuss.php?d=116",
+    "discussion_id": 116,
+    "post_id": 118,
+    "posted_at_local": "2026-09-25T16:23:37+08:00",
+    "course_id": 3476,
+    "course_shortname": "TTTK2233",
+    "course_name": "TTTK2233 CYBER SECURITY"
+  }
+]
+```
+
+`source` is one of `forum_post`, `section`, `label`, `page`, `book`, `resource`, `folder`, or another activity type (e.g. `assign`) whose description is shown on the course page. Non-forum items carry `cmid` and `section` instead of `discussion_id`/`post_id`. Theme icons, the site logo and sidebar-block images are filtered out.
+
+### 10. `view_image`
+
+Fetch an image and return it as MCP image content, so the AI can actually read it (text on a poster, a QR code, a timetable …).
+
+| Parameter | Type | Default | Description |
+|------|------|------|------|
+| `image_url` | string | — | An `image_url` from any tool above, or a `file_url` that `read_document` marked `is_image` |
+| `max_edge` | int | `1568` | Downscale so the longer side is at most this many pixels; raise only if fine print is unreadable |
+
+Returns two content blocks: a JSON text block with metadata, then the image.
+
+```jsonc
+{"image_url": "https://ukmfoliov2.ukm.my/pluginfile.php/14955/mod_forum/post/287/Gemini_Generated_Image_lfv2fwlfv2fwlfv2.jpg",
+ "filename": "Gemini_Generated_Image_lfv2fwlfv2fwlfv2.jpg",
+ "original_format": "JPEG", "original_size": [1536, 2752], "original_bytes": 3504647,
+ "size": [875, 1568], "bytes": 361833, "resized": true}
+```
+
+- UKM Folio images are fetched with the logged-in session (expired sessions re-login automatically).
+- Externally hosted images are fetched **without** cookies, and loopback/private addresses are refused.
+- JPEG/PNG/GIF/WEBP within limits pass through unchanged; larger images are downscaled, and other formats (BMP, TIFF …) are converted to JPEG (or PNG when transparent). SVG is not supported.
+
+### 11. `whoami`
 
 Diagnostic tool, no parameters.
 
 ```jsonc
 {
-  "base_url": "https://ukmfolio.ukm.my",
+  "base_url": "https://ukmfoliov2.ukm.my",
   "sesskey": "LvH2dF34SK",
   "timezone": "Asia/Kuala_Lumpur",
   "course_count": 6
@@ -466,6 +547,8 @@ Once a client is connected, you can simply ask in natural language and the AI wi
 - **"Read TTTN2423's Course Proforma and summarize the grade breakdown."** → `list_documents(course="TTTN2423")` to find the cmid → `read_document(cmid, "resource")` → summarize from the extracted text
 - **"Which course's slides got updated this week, and what do they cover?"** → `list_documents` + `read_document` (folder/resource)
 - **"Give me the full content of this announcement and any follow-up replies."** → `get_discussion(discussion_id)`
+- **"What did the TTTC3213 lecturer's welcome poster say?"** → `list_announcements(course="TTTC3213")` → the item's `images[0].image_url` → `view_image(image_url)`
+- **"Did any teacher post a WhatsApp/Telegram group QR code?"** → `list_images()` → `view_image` on the likely candidates
 
 ---
 
@@ -526,6 +609,8 @@ sudo systemctl status ukmfolio-mcp
 | `read_document` returns empty text | Likely a scanned image PDF (no text layer; OCR is not done), or an unsupported file type |
 | Iterating "all courses" is slow | Documents/announcements are fetched per course, one request at a time — pass `course` to narrow the scope |
 | `File exceeds 25 MB cap` | A single file is over the 25 MB cap; download it yourself using the returned `file_url` |
+| `view_image`: `not a decodable image` | The URL isn't a raster image Pillow can read (e.g. SVG), or it points to a page rather than a file |
+| `Step 1 failed: could not reach the SSO IdP` | The site's login entry changed; check that `base_url` is `https://ukmfoliov2.ukm.my` |
 
 ---
 
@@ -539,8 +624,10 @@ UKMFolioMCP/
 │   ├── auth.py         SAML 2.0 SSO login → (session, sesskey)
 │   ├── moodle.py       Moodle AJAX calls + HTML scraping (courses/deadlines/submission status/forums/documents)
 │   ├── documents.py    cmid → file links → download → text extraction
+│   ├── images.py       Find teacher-posted images in HTML/file lists; download + downscale for view_image
 │   ├── client.py       UKMFolioClient: session caching, auto-relogin, AI-friendly shaping
 │   └── server.py       FastMCP tool definitions + CLI (--stdio / --http-server)
+├── tests/              Offline pytest suite (no network)
 ├── config.example.json Config template
 ├── config.json         Real credentials (git-ignored)
 ├── requirements.txt
@@ -551,11 +638,12 @@ UKMFolioMCP/
 
 Key technical points:
 
-- **Authentication**: UKM Folio uses SAML SSO (a SimpleSAMLphp IdP), **not** Moodle Web Service tokens. After login yields a `session` + `sesskey`, they are cached and reused; when Moodle reports a session-expiry error, the client re-logins and retries automatically.
+- **Authentication**: UKM Folio uses SAML SSO (a SimpleSAMLphp IdP), **not** Moodle Web Service tokens. On UKMFolio v2, `/login/index.php` shows a local login form, so SAML is started from `/login/?saml=on` instead. After login yields a `session` + `sesskey`, they are cached and reused; when Moodle reports a session-expiry error, the client re-logins and retries automatically.
 - **Deadlines**: calls `core_calendar_get_action_events_by_courses` and deduplicates the multiple calendar events of one activity, keeping only the single most authoritative one per activity.
 - **Submission status**: the `mod_assign_*` web-service functions are disabled here, so each assignment's view page (`/mod/assign/view.php?id=<cmid>`) is scraped for its "Submission status" summary table. Assignments are enumerated from `core_courseformat_get_state`, and the raw status strings are normalized into `submitted` / `graded` / `is_overdue` booleans.
 - **Announcements/forums**: the site disables list-level forum APIs, so it first scrapes the course/forum pages to discover discussions, then uses `mod_forum_get_discussion_posts` to pull the root post content.
 - **Documents**: uses `core_courseformat_get_state` to enumerate modules and infers type from the URL. A `resource` 303-redirects to the real file on `pluginfile.php`; a `folder` page has one link per file. Text extraction: `pypdf` (PDF), `python-docx` (DOCX), `python-pptx` (PPTX), `openpyxl` (XLSX), plus plain text and HTML. There is a 25 MB per-file cap, and extracted text is truncated by `max_chars` (default 50,000 characters).
+- **Images**: forum images come from each post's `message` HTML plus its `attachments` / `messageinlinefiles`. The course page lazy-loads its sections, so its HTML is incomplete; labels and activity cards are rendered one by one via `core_course_get_module`, section summaries are read from `course/section.php` (only for sections with `hassummary`), and page/book/resource/folder modules go through document resolution. `view_image` returns MCP `ImageContent` with no structured output, so the base64 is not duplicated.
 
 ---
 
@@ -563,7 +651,7 @@ Key technical points:
 
 - **Read-only**: never submits assignments, posts to forums, or changes grades.
 - The SSO certificate (`CN=sso.ukm.my`) is self-signed and expired but still in use; the login flow tolerates this.
-- No OCR — scanned image PDFs yield no extractable text.
+- No OCR — scanned image PDFs yield no extractable text. (Standalone images can be read by the AI through `view_image`; images inside PDFs/PPTX are not extracted.)
 - The `book` module currently only fetches the first page's HTML.
 - The service has no built-in authentication; when exposing HTTP mode publicly, always add a reverse proxy + TLS + access control.
 - Keep credentials in environment variables or protect `config.json` (git-ignored by default).

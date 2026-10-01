@@ -14,10 +14,11 @@ from __future__ import annotations
 
 import argparse
 import functools
+import json
 import sys
 
 import anyio
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Image
 
 from .client import UKMFolioClient
 from .config import Config, load_config
@@ -38,7 +39,15 @@ text.
 
 To check whether assignments have been submitted/graded, use
 `get_submission_status` (this is separate from `list_deadlines`, which only
-reports due dates).\
+reports due dates).
+
+Teachers often post the actual content of an announcement as an image (a
+poster, schedule, or QR code). Wherever an image appears, results include an
+`images` list (each with an `image_url`) and post text contains an inline
+marker `[image: <alt> | <image_url>]`; files that are images carry
+`is_image: true`. When an image may hold relevant information, call
+`view_image(image_url)` to see it. `list_images` lists every image in a
+course.\
 """
 
 mcp = FastMCP("ukmfolio", instructions=INSTRUCTIONS)
@@ -141,6 +150,11 @@ async def list_announcements(course: str | None = None,
     Each item includes item_title, author, posted_at (unix), posted_at_local
     (ISO), reply_count, item_url, item_id (the discussion id — pass it to
     get_discussion for the full thread), and course info.
+
+    `images` lists every image posted anywhere in the thread (image_url,
+    filename, alt, post_id); item_body marks where each sits as
+    `[image: <alt> | <image_url>]`. Pass an image_url to view_image to see it —
+    announcements are often just a poster with no text.
     """
     return await _run(get_client().get_announcements,
                       course=course, limit=limit, with_body=with_body)
@@ -152,7 +166,9 @@ async def get_discussion(discussion_id: int) -> dict:
 
     Returns the discussion title, url, post_count, and every post (oldest
     first) with author, subject, created/modified timestamps, and both the
-    HTML and plain-text message bodies.
+    HTML and plain-text message bodies. Each post's `images` lists embedded
+    and attached images (pass image_url to view_image); message_text marks
+    them inline as `[image: <alt> | <image_url>]`.
     """
     return await _run(get_client().get_discussion, discussion_id)
 
@@ -190,6 +206,8 @@ async def read_document(cmid: int, type: str = "resource",
     Returns the resolved files (filename, file_url, content_type, size_bytes,
     extracted text), plus external_url for url modules and page_text for
     page/book modules. text_truncated/page_text_truncated flag truncation.
+    Image files are not downloaded here: they carry is_image=true — pass their
+    file_url to view_image. Page/book bodies list embedded images in `images`.
     """
     return await _run(get_client().get_document_content,
                       cmid=cmid, module_type=type,
@@ -208,6 +226,54 @@ async def list_modules(course: str | None = None) -> list[dict]:
         course: Optional course filter (id, shortname, or name substring).
     """
     return await _run(get_client().list_modules, course=course)
+
+
+@mcp.tool()
+async def list_images(course: str | None = None,
+                      include_forums: bool = True,
+                      include_course_content: bool = True) -> list[dict]:
+    """List images teachers have posted, with an image_url for each.
+
+    Scans forum discussions (images embedded in or attached to any post) and
+    course content: section summaries, labels / activity descriptions,
+    page/book bodies, and image files in resource/folder modules.
+
+    Args:
+        course: Optional course filter (id, shortname, or name substring).
+            Omitting it scans every enrolled course (slow — one request per
+            discussion and per module).
+        include_forums: Scan forum posts (default True).
+        include_course_content: Scan non-forum course content (default True).
+
+    Each item includes image_url (pass it to view_image), filename, alt text,
+    source (forum_post/section/label/page/book/resource/folder/assign/...),
+    source_title, source_url, cmid or discussion_id + post_id,
+    posted_at_local for forum images, and course info.
+    """
+    return await _run(get_client().list_images, course=course,
+                      include_forums=include_forums,
+                      include_course_content=include_course_content)
+
+
+@mcp.tool(structured_output=False)
+async def view_image(image_url: str, max_edge: int = 1568) -> list:
+    """Fetch an image and return it so you can see its content.
+
+    Use this for any image_url from list_images / list_announcements /
+    get_discussion (`images`), or a file_url that read_document marked
+    is_image. UKMFolio images are fetched with the student's login session.
+
+    Args:
+        image_url: The image's URL exactly as returned by another tool.
+        max_edge: Downscale so the longer side is at most this many pixels
+            (default 1568). Raise it only if fine print is unreadable.
+
+    Returns a JSON text block (original/returned size and format) followed by
+    the image itself.
+    """
+    data, fmt, info = await _run(get_client().view_image, image_url,
+                                 max_edge=max_edge)
+    return [json.dumps(info, ensure_ascii=False), Image(data=data, format=fmt)]
 
 
 @mcp.tool()

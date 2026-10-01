@@ -12,7 +12,7 @@ import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from . import documents, moodle
+from . import documents, images, moodle
 from .auth import login
 from .config import Config
 from .moodle import SessionExpired
@@ -254,6 +254,8 @@ class UKMFolioClient:
             "external_url": resolved.get("external_url"),
             "files": [],
         }
+        if resolved.get("images"):
+            result["images"] = resolved["images"]
         if resolved.get("page_text") is not None:
             text = resolved["page_text"]
             result["page_text"], result["page_text_truncated"] = _truncate(
@@ -261,6 +263,11 @@ class UKMFolioClient:
 
         for f in resolved["files"]:
             entry = {"filename": f["filename"], "file_url": f["file_url"]}
+            if images.is_image_name(f["filename"]):
+                entry["is_image"] = True
+                entry["note"] = _VIEW_IMAGE_NOTE
+                result["files"].append(entry)
+                continue
             if extract:
                 try:
                     filename, ct, data = self._call(
@@ -275,6 +282,11 @@ class UKMFolioClient:
                 entry["filename"] = filename
                 entry["content_type"] = ct
                 entry["size_bytes"] = len(data)
+                if images.is_image_name(filename, ct):
+                    entry["is_image"] = True
+                    entry["note"] = _VIEW_IMAGE_NOTE
+                    result["files"].append(entry)
+                    continue
                 text = documents.extract_text(filename, ct, data)
                 if text is None:
                     entry["text"] = None
@@ -286,6 +298,56 @@ class UKMFolioClient:
 
         return result
 
+    # --- images -------------------------------------------------------------
+
+    def list_images(self, course_id=None, course=None,
+                    include_forums: bool = True,
+                    include_course_content: bool = True) -> list[dict]:
+        """Every teacher-posted image in the resolved course(s).
+
+        Forum images (embedded or attached, any post in a thread) plus images
+        in section summaries, labels/activity descriptions, page/book bodies
+        and image files in resource/folder modules. Forum images come first,
+        newest discussion first.
+        """
+        cmap = self._course_map()
+        course_ids = self._resolve_course_ids(course_id, course)
+        out: list[dict] = []
+
+        if include_forums:
+            discussions = self._call(
+                lambda s, k: moodle.get_forum_discussions(
+                    s, k, self.base_url, course_ids, with_body=False))
+            discussions.sort(key=lambda d: d.get("posted_at") or 0, reverse=True)
+            for d in discussions:
+                for img in d["images"]:
+                    out.append(self._enrich({
+                        **img,
+                        "source": "forum_post",
+                        "source_title": d["item_title"],
+                        "source_url": d["item_url"],
+                        "discussion_id": d["item_id"],
+                        "posted_at_local": self._iso(d.get("posted_at")),
+                        "course_id": d["course_id"],
+                    }, cmap))
+
+        if include_course_content:
+            for cid in course_ids:
+                found = self._call(
+                    lambda s, k, cid=cid: moodle.get_course_images(
+                        s, k, self.base_url, cid))
+                for img in found:
+                    img["course_id"] = cid
+                    out.append(self._enrich(img, cmap))
+
+        return out
+
+    def view_image(self, image_url: str, max_edge: int = 1568):
+        """Download one image -> ``(data, format, info)`` (see images.fetch_image)."""
+        return self._call(
+            lambda s, k: images.fetch_image(s, self.base_url, image_url,
+                                            max_edge=max_edge))
+
     # --- diagnostics --------------------------------------------------------
 
     def whoami(self) -> dict:
@@ -296,6 +358,9 @@ class UKMFolioClient:
             "timezone": str(self._tz),
             "course_count": len(self.get_courses()),
         }
+
+
+_VIEW_IMAGE_NOTE = "image file — call view_image(file_url) to see its content"
 
 
 def _truncate(text: str, max_chars: int) -> tuple[str, bool]:

@@ -4,7 +4,9 @@ Adapted from the proven UKMFolioPuller ``auth.py``. UKMFolio uses SAML SSO
 (SimpleSAMLphp IdP at sso.ukm.my), NOT Moodle web-service tokens.
 
 Login flow:
-1. GET  ukmfolio.ukm.my/login/index.php   -> 302 -> sso.ukm.my SSOService.php?SAMLRequest=...
+1. GET  <base>/login/index.php            -> 30x -> sso.ukm.my SSOService.php?SAMLRequest=...
+   (UKMFolio v2 renders a local login form here instead; SAML then starts
+   from <base>/login/?saml=on)
 2. GET  SSOService.php                     -> 302 -> loginuserpass.php?AuthState=...
 3. GET  loginuserpass.php                  -> 200 -> login form (extract AuthState)
 4. POST loginuserpass.php (credentials)    -> 200 -> auto-submit form (SAMLResponse)
@@ -16,6 +18,7 @@ from __future__ import annotations
 
 import re
 from html.parser import HTMLParser
+from urllib.parse import urljoin, urlparse
 
 import requests
 
@@ -69,6 +72,36 @@ def _extract_sesskey(html: str) -> str | None:
     return None
 
 
+_REDIRECT_CODES = (301, 302, 303, 307, 308)
+
+
+def _find_idp_url(session: requests.Session, base_url: str, sso_url: str) -> str:
+    """Return the IdP ``SSOService.php?SAMLRequest=...`` URL.
+
+    The original site 302-redirected ``/login/index.php`` straight to the IdP.
+    UKMFolio v2 instead renders a local login form (200) and only starts SAML
+    from ``/login/?saml=on``. The old host also now redirects to v2. Follow
+    Moodle-side redirects until one leaves for the IdP; on a 200 login page,
+    retry via the SAML entry point.
+    """
+    sso_host = urlparse(sso_url).netloc
+    candidates = [f"{base_url}/login/index.php", f"{base_url}/login/?saml=on"]
+    url = candidates.pop(0)
+    for _ in range(6):
+        resp = session.get(url, allow_redirects=False)
+        if resp.status_code in _REDIRECT_CODES:
+            url = urljoin(url, resp.headers["Location"])
+            if urlparse(url).netloc == sso_host:
+                return url
+            continue
+        if resp.status_code == 200 and candidates:
+            url = candidates.pop(0)
+            continue
+        break
+    raise RuntimeError(
+        f"Step 1 failed: could not reach the SSO IdP (last: {resp.status_code} {url})")
+
+
 def new_session() -> requests.Session:
     session = requests.Session()
     session.headers.update({"User-Agent": USER_AGENT})
@@ -89,15 +122,12 @@ def login(config: dict) -> tuple[requests.Session, str]:
     sso_url = config["sso_url"].rstrip("/")
 
     # Step 1: Moodle login page -> redirect to IdP
-    resp = session.get(f"{base_url}/login/index.php", allow_redirects=False)
-    if resp.status_code != 302:
-        raise RuntimeError(f"Step 1 failed: expected 302, got {resp.status_code}")
-    idp_url = resp.headers["Location"]
+    idp_url = _find_idp_url(session, base_url, sso_url)
 
     # Step 2: IdP SSO endpoint -> redirect to login form
     resp = session.get(idp_url, allow_redirects=False)
-    if resp.status_code != 302:
-        raise RuntimeError(f"Step 2 failed: expected 302, got {resp.status_code}")
+    if resp.status_code not in _REDIRECT_CODES:
+        raise RuntimeError(f"Step 2 failed: expected redirect, got {resp.status_code}")
     login_form_url = resp.headers["Location"]
     if login_form_url.startswith("/"):
         login_form_url = sso_url + login_form_url

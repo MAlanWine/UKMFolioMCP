@@ -25,12 +25,13 @@ import re
 import requests
 from bs4 import BeautifulSoup
 
+from . import images as images_mod
+
 # --- URL patterns -----------------------------------------------------------
 
 _FORUM_VIEW_RE = re.compile(r"/mod/forum/view\.php\?id=(\d+)")
 _DISCUSS_LINK_RE = re.compile(r"/mod/forum/discuss\.php\?d=(\d+)")
 _MODULE_TYPE_RE = re.compile(r"/mod/([a-z0-9]+)/view\.php")
-_TAG_RE = re.compile(r"<[^>]+>")
 
 # Module types that represent "documents" / learning materials a student reads.
 DOCUMENT_MODULE_TYPES = {"resource", "folder", "url", "page", "book"}
@@ -62,10 +63,6 @@ class SessionExpired(MoodleError):
 
 
 # --- helpers ----------------------------------------------------------------
-
-def _strip_tags(s: str) -> str:
-    return html_mod.unescape(_TAG_RE.sub("", s or "")).strip()
-
 
 def _clean(s: str) -> str:
     return html_mod.unescape((s or "").strip())
@@ -184,6 +181,19 @@ def get_discussion_ids(session, base_url, cmid) -> list[int]:
     return sorted({int(m) for m in _DISCUSS_LINK_RE.findall(r.text)})
 
 
+def _post_images(post: dict, base_url: str) -> list[dict]:
+    """Images in a forum post: embedded in the body, attached, or inline files."""
+    found = images_mod.extract_images(post.get("message") or "", base_url)
+    found += images_mod.images_from_files(post.get("attachments"))
+    found += images_mod.images_from_files(post.get("messageinlinefiles"))
+    out, seen = [], set()
+    for img in found:
+        if img["image_url"] not in seen:
+            seen.add(img["image_url"])
+            out.append(img)
+    return out
+
+
 def get_discussion_posts(session, sesskey, base_url, discussion_id) -> list[dict]:
     """Fetch all posts of a single discussion (full thread), oldest first."""
     data = _ajax_call(session, sesskey, base_url,
@@ -193,14 +203,16 @@ def get_discussion_posts(session, sesskey, base_url, discussion_id) -> list[dict
     out = []
     for p in posts:
         author = p.get("author") or {}
+        message = p.get("message") or ""
         out.append({
             "post_id": p.get("id"),
             "subject": _clean(p.get("subject")),
             "author": author.get("fullname", ""),
             "timecreated": p.get("timecreated"),
             "timemodified": p.get("timemodified"),
-            "message_html": p.get("message") or "",
-            "message_text": _strip_tags(p.get("message") or ""),
+            "message_html": message,
+            "message_text": images_mod.text_with_image_markers(message, base_url),
+            "images": _post_images(p, base_url),
             "parent_id": p.get("parentid"),
         })
     out.sort(key=lambda p: p.get("post_id") or 0)
@@ -259,6 +271,9 @@ def get_forum_discussions(session, sesskey, base_url, course_ids,
                     "course_id": course_id,
                     "forum_cmid": cmid,
                     "reply_count": max(len(posts) - 1, 0),
+                    # Every image in the thread; fetch one via view_image.
+                    "images": [dict(img, post_id=p["post_id"])
+                               for p in posts for img in p["images"]],
                 }
                 if with_body:
                     item["item_body"] = root["message_text"]
@@ -451,3 +466,92 @@ def get_assignment_status(session, base_url, cmid) -> dict:
     if "/login/index.php" in r.url:
         raise SessionExpired("notloggedin", "redirected to login page")
     return _parse_assignment_status(r.text, base_url, int(cmid))
+
+
+# --- images in course content -----------------------------------------------
+# Forum images come from get_forum_discussions (each item carries "images").
+# This covers the rest of the course: section summaries, labels and other
+# activity cards (rendered via core_course_get_module — the course page itself
+# lazy-loads sections, so its HTML is incomplete), page/book bodies, and
+# resource/folder modules whose files are images.
+
+_CARD_TYPES_SKIP = {"forum", "resource", "folder", "url", "page", "book"}
+
+
+def _section_summary_images(session, base_url, section: dict) -> list[dict]:
+    url = section.get("sectionurl") or \
+        f"{base_url}/course/section.php?id={section.get('id')}"
+    r = session.get(url, timeout=30)
+    r.raise_for_status()
+    if "/login/index.php" in r.url:
+        raise SessionExpired("notloggedin", "redirected to login page")
+    soup = BeautifulSoup(r.text, "lxml")
+    sec = soup.find(attrs={"data-for": "section", "data-id": str(section.get("id"))})
+    if sec is None:
+        return []
+    for cm in sec.find_all(attrs={"data-for": "cmitem"}):
+        cm.decompose()  # modules are scanned separately
+    return images_mod.extract_images(str(sec), base_url)
+
+
+def get_course_images(session, sesskey, base_url, course_id) -> list[dict]:
+    """Images in a course's non-forum content (see the section comment)."""
+    from . import documents  # deferred: documents imports this module
+
+    state = get_course_modules(session, sesskey, base_url, course_id)
+    section_names: dict = {}
+    for sec in state.get("section", []):
+        section_names[str(sec.get("id"))] = sec.get("title") or sec.get("name") or ""
+
+    out: list[dict] = []
+
+    def add(found, **source):
+        for img in found:
+            out.append({**img, **source})
+
+    for sec in state.get("section", []):
+        if not sec.get("hassummary"):
+            continue
+        try:
+            found = _section_summary_images(session, base_url, sec)
+        except SessionExpired:
+            raise
+        except Exception:
+            continue
+        add(found, source="section",
+            source_title=section_names.get(str(sec.get("id")), ""),
+            source_url=sec.get("sectionurl") or "",
+            section=section_names.get(str(sec.get("id")), ""))
+
+    for cm in state.get("cm", []):
+        if not cm.get("uservisible", True):
+            continue
+        url = cm.get("url") or ""
+        mtype = _module_type(url) or cm.get("modname") or "label"
+        cmid = int(cm["id"])
+        meta = {
+            "source": mtype,
+            "source_title": _clean(cm.get("name", "")),
+            "source_url": url or f"{base_url}/course/view.php?id={course_id}#module-{cmid}",
+            "cmid": cmid,
+            "section": section_names.get(str(cm.get("sectionid")), ""),
+        }
+        try:
+            if mtype in ("resource", "folder", "page", "book"):
+                resolved = documents.resolve_files(session, base_url, cmid, mtype)
+                add(resolved["images"], **meta)
+                add([{"image_url": f["file_url"], "filename": f["filename"], "alt": ""}
+                     for f in resolved["files"]
+                     if images_mod.is_image_name(f["filename"])], **meta)
+            elif mtype not in _CARD_TYPES_SKIP:
+                # Labels, plus descriptions shown on the course page for
+                # assignments/quizzes/etc.
+                card = _ajax_call(session, sesskey, base_url,
+                                  "core_course_get_module", {"id": cmid})
+                add(images_mod.extract_images(card or "", base_url), **meta)
+        except SessionExpired:
+            raise
+        except Exception:
+            continue
+
+    return out
