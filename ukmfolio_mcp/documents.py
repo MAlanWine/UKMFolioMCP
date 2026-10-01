@@ -95,12 +95,7 @@ def resolve_files(session, base_url, cmid: int, module_type: str) -> dict:
             result["external_url"] = r.headers.get("Location")
         else:
             _check_login_redirect(r)
-            m = re.search(r'<a[^>]+href="([^"]+)"[^>]*class="[^"]*urlworkaround',
-                          r.text)
-            if not m:
-                m = re.search(r'window\.open\(["\']([^"\']+)["\']', r.text)
-            if m:
-                result["external_url"] = m.group(1)
+            result["external_url"] = _url_module_link(r.text)
 
     elif module_type in ("page", "book"):
         view = "page" if module_type == "page" else "book"
@@ -236,6 +231,21 @@ def _main_element(html: str):
             or soup.find(id="region-main")
             or soup.body
             or soup)
+
+
+def _url_module_link(html: str) -> str | None:
+    """External link from a url module page that did not redirect.
+
+    Moodle renders ``<div class="urlworkaround">Click on <a href="...">name</a>
+    to open the resource.</div>``; popup display mode uses ``window.open``.
+    """
+    from bs4 import BeautifulSoup
+
+    a = BeautifulSoup(html, "lxml").select_one(".urlworkaround a[href]")
+    if a:
+        return a["href"]
+    m = re.search(r'window\.open\(["\']([^"\']+)["\']', html)
+    return m.group(1) if m else None
 
 
 def _main_html(html: str) -> str:
